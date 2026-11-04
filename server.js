@@ -60,6 +60,64 @@ app.get("/api/trades", async (req, res) => {
   }
 });
 
+// second route for prices endpoint
+app.get("/api/prices", async (req, res) => {
+  try {
+    // read symbols from the query parameters
+    const symbolsParam = req.query.symbols;
+    // return an empty object if no symbols are provided
+    if (!symbolsParam) return res.json({});
+    const symbols = symbolsParam.split(",");
+
+    const key = process.env.FMP_KEY;
+    const results = {};
+
+    // for each symbol, fetch the price data from FMP and store it in the results object
+    for (const symbol of symbols) {
+      // unique cache key for each symbol
+      const cached = await pool.query(
+        "SELECT data, EXTRACT(EPOCH FROM (NOW() - cached_at))/ 60 AS age_minutes FROM api_cache WHERE cache_key = $1",
+        [`price-${symbol}`],
+      );
+
+      // if cached data is less than 60 mins old, use it
+      if (cached.rows.length > 0 && Number(cached.rows[0].age_minutes) < 60) {
+        console.log(`Serving price for ${symbol} from CACHE`);
+        results[symbol] = cached.rows[0].data;
+        continue;
+      }
+
+      // otherwise, fetch fresh data from FMP
+      try {
+        const response = await fetch(
+          `https://financialmodelingprep.com/stable/quote-short?symbol=${symbol}&apikey=${key}`,
+        );
+        if (!response.ok) continue;
+        const json = await response.json();
+        if (json[0]) {
+          const priceData = { price: json[0].price, change: json[0].change };
+          results[symbol] = priceData;
+
+          // save or update the cache for this symbol
+          await pool.query(
+            `INSERT INTO api_cache (cache_key, data, cached_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (cache_key) DO UPDATE SET data = $2, cached_at = NOW()`,
+            [`price-${symbol}`, JSON.stringify(priceData)],
+          );
+        }
+      } catch (error) {
+        console.error(`Error fetching price data for ${symbol}:`, error);
+      }
+    }
+    // return the results object containing price data for all requested symbols
+    res.json(results);
+  } catch (error) {
+    console.error("Error fetching price data:", error);
+    res.status(500).json({ error: "Failed to fetch price data" });
+  }
+});
+
 app.listen(3000, () => {
   console.log("server is running on port 3000");
 });
